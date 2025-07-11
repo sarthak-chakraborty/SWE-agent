@@ -68,6 +68,7 @@ SWE-agent is built and maintained by researchers from Princeton University and S
 
 ## 📣 News
 
+* **NEW**: [Multimodal support for SWE-bench](usage/multimodal.md) - Process images from GitHub issues with vision-capable AI models
 * May 2: [SWE-agent-LM-32b](https://swesmith.com) achieves open-weights SOTA on SWE-bench
 * Feb 28: [SWE-agent 1.0 + Claude 3.7 is SoTA on SWE-Bench full](https://x.com/KLieret/status/1895487966409298067)
 * Feb 25: [SWE-agent 1.0 + Claude 3.7 is SoTA on SWE-bench verified](https://x.com/KLieret/status/1894408819670733158)
@@ -76,5 +77,6 @@ SWE-agent is built and maintained by researchers from Princeton University and S
 
 ## ✍️ Doc updates
 
+* June 26: [Adding custom tools](usage/adding_custom_tools.md)
 * Apr 8: [Running SWE-agent competitively](usage/competitive_runs.md)
 * Mar 7: [Updated SWE-agent architecture diagram of 1.0](background/architecture.md)

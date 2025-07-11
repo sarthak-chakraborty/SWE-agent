@@ -143,6 +143,12 @@ class GenericAPIModelConfig(PydanticBaseModel):
     Use this for local models or models not (yet) in the default litellm model registry for tracking costs.
     """
 
+    custom_tokenizer: dict[str, Any] | None = None
+    """Override the default tokenizer for the model.
+    Use the arguments of `litellm.create_pretrained_tokenizer`.
+    Basic example: `{"identifier": "hf-internal-testing/llama-tokenizer"}`
+    """
+
     # pydantic
     model_config = ConfigDict(extra="forbid")
 
@@ -185,7 +191,14 @@ class GenericAPIModelConfig(PydanticBaseModel):
 
     @property
     def id(self) -> str:
-        return f"{self.name}__t-{self.temperature:.2f}__p-{self.top_p:.2f}__c-{self.per_instance_cost_limit:.2f}"
+        name = self.name.replace("/", "--")
+        if self.top_p is not None:
+            top_p = f"{self.top_p:.2f}"
+        else:
+            top_p = "None"
+        temperature = f"{self.temperature:.2f}"
+        per_instance_cost_limit = f"{self.per_instance_cost_limit:.2f}"
+        return f"{name}__t-{temperature}__p-{top_p}__c-{per_instance_cost_limit}"
 
 
 class ReplayModelConfig(GenericAPIModelConfig):
@@ -443,7 +456,7 @@ class HumanThoughtModel(HumanModel):
             thought_all += thought
             thought = input("... ")
 
-        action = super()._query(history, action_prompt="Action: ")
+        action = super()._query(history, action_prompt="Action: ")["message"]
 
         return {"message": f"{thought_all}\n```\n{action}\n```"}
 
@@ -606,7 +619,10 @@ class LiteLLMModel(AbstractModel):
                     "completion_kwargs to {'extra_headers': {'anthropic-beta': 'output-128k-2025-02-19'}}."
                 )
 
-        self.lm_provider = litellm.model_cost.get(self.config.name, {}).get("litellm_provider")
+        self.lm_provider = litellm.model_cost.get(self.config.name, {}).get("litellm_provider", self.config.name)
+        self.custom_tokenizer = None
+        if self.config.custom_tokenizer is not None:
+            self.custom_tokenizer = litellm.utils.create_pretrained_tokenizer(**self.config.custom_tokenizer)
 
     @property
     def instance_cost_limit(self) -> float:
@@ -669,7 +685,11 @@ class LiteLLMModel(AbstractModel):
         for message in messages_no_cache_control:
             if "cache_control" in message:
                 del message["cache_control"]
-        input_tokens: int = litellm.utils.token_counter(messages=messages_no_cache_control, model=self.config.name)
+        input_tokens: int = litellm.utils.token_counter(
+            messages=messages_no_cache_control,
+            model=self.custom_tokenizer["identifier"] if self.custom_tokenizer is not None else self.config.name,
+            custom_tokenizer=self.custom_tokenizer,
+        )
         if self.model_max_input_tokens is None:
             msg = (
                 f"No max input tokens found for model {self.config.name!r}. "
@@ -730,7 +750,11 @@ class LiteLLMModel(AbstractModel):
         output_tokens = 0
         for i in range(n_choices):
             output = choices[i].message.content or ""
-            output_tokens += litellm.utils.token_counter(text=output, model=self.config.name)
+            output_tokens += litellm.utils.token_counter(
+                text=output,
+                model=self.custom_tokenizer["identifier"] if self.custom_tokenizer is not None else self.config.name,
+                custom_tokenizer=self.custom_tokenizer,
+            )
             output_dict = {"message": output}
             if self.tools.use_function_calling:
                 if response.choices[i].message.tool_calls:  # type: ignore
@@ -788,6 +812,7 @@ class LiteLLMModel(AbstractModel):
                     ContentPolicyViolationError,
                     ModelConfigurationError,
                     KeyboardInterrupt,
+                    IndexError,
                 )
             ),
             before_sleep=retry_warning,
