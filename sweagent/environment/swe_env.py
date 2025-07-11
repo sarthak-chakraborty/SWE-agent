@@ -171,6 +171,90 @@ class SWEEnv:
         asyncio.run(self.deployment.stop())
         self._chook.on_close()
 
+    def restart_deployment_with_image(self, new_image: str, reuse_existing_repo: bool = False) -> None:
+        """Restart the deployment with a different Docker image.
+        
+        This method allows you to switch to a different Docker image during the middle
+        of a SWE-Agent run while preserving the environment state.
+        
+        Args:
+            new_image: The new Docker image to use for the deployment
+            preserve_repo_state: If True, preserves the repository state without resetting it
+            reuse_existing_repo: If True, does not touch/copy/reset the repo at all (assumes repo is already present in the container)
+        """
+        self.logger.info(f"Restarting deployment with new image: {new_image}")
+        
+        current_repo = self.repo
+        asyncio.run(self.deployment.stop())
+        
+        # Create new deployment config with the new image
+        from swerex.deployment.config import DockerDeploymentConfig
+        new_deployment_config = DockerDeploymentConfig(
+            image=new_image,
+            port=self.deployment._config.port if hasattr(self.deployment, '_config') else None,
+            docker_args=self.deployment._config.docker_args if hasattr(self.deployment, '_config') else [],
+            startup_timeout=self.deployment._config.startup_timeout if hasattr(self.deployment, '_config') else 180.0,
+            pull=self.deployment._config.pull if hasattr(self.deployment, '_config') else "missing",
+            remove_images=self.deployment._config.remove_images if hasattr(self.deployment, '_config') else False,
+            # python_standalone_dir=self.deployment._config.python_standalone_dir if hasattr(self.deployment, '_config') else None,
+            python_standalone_dir=None,
+            platform=self.deployment._config.platform if hasattr(self.deployment, '_config') else None,
+            remove_container=self.deployment._config.remove_container if hasattr(self.deployment, '_config') else True,
+        )
+        
+        # Create new deployment
+        from swerex.deployment.config import get_deployment
+        self.deployment = get_deployment(new_deployment_config)
+        
+        self.repo = current_repo
+        self._init_deployment()
+        
+        if reuse_existing_repo:
+            self.logger.info("Skipping all repo copy/reset (repo is already present in the container).")
+            self._chook.on_environment_startup()
+        else:
+            self.reset()
+        
+        for command in self._post_startup_commands:
+            self.communicate(command, check="raise", timeout=self.post_startup_command_timeout)
+        
+        self.logger.info(f"Successfully restarted deployment with image: {new_image}")
+
+    def restart_deployment_with_config(self, new_deployment_config: "DockerDeploymentConfig", reuse_existing_repo: bool = False) -> None:
+        """Restart the deployment with a completely new deployment configuration.
+        
+        This method allows you to switch to a different Docker deployment configuration
+        during the middle of a SWE-Agent run while preserving the environment state.
+        
+        Args:
+            new_deployment_config: The new Docker deployment configuration to use
+            preserve_repo_state: If True, preserves the repository state without resetting it
+            reuse_existing_repo: If True, does not touch/copy/reset the repo at all (assumes repo is already present in the container)
+        """
+        self.logger.info(f"Restarting deployment with new config: {new_deployment_config.image}")
+        
+        current_repo = self.repo
+        self.deployment.stop()
+        
+        # Create new deployment
+        from swerex.deployment.config import get_deployment
+        self.deployment = get_deployment(new_deployment_config)
+        
+        self.repo = current_repo
+        self._init_deployment()
+        
+        if reuse_existing_repo:
+            self.logger.info("Skipping all repo copy/reset (repo is already present in the container).")
+            self._chook.on_environment_startup()
+        else:
+            self.reset()
+        
+        # Re-run post startup commands
+        for command in self._post_startup_commands:
+            self.communicate(command, check="raise", timeout=self.post_startup_command_timeout)
+        
+        self.logger.info(f"Successfully restarted deployment with config: {new_deployment_config.image}")
+
     # MARK: Helper functions #
 
     def _init_deployment(

@@ -8,6 +8,11 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
 
+import dill
+import base64
+import uuid
+import requests
+
 import yaml
 from jinja2 import Template
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -55,6 +60,7 @@ from sweagent.utils.config import _convert_paths_to_abspath, _strip_abspath_from
 from sweagent.utils.jinja_warnings import _warn_probably_wrong_jinja_syntax
 from sweagent.utils.log import get_logger
 from sweagent.utils.patch_formatter import PatchFormatter
+from sweagent.state.global_orchestrator import GlobalOrchestrator
 
 
 class TemplateConfig(BaseModel):
@@ -519,6 +525,10 @@ class DefaultAgent(AbstractAgent):
     def trajectory(self) -> Trajectory:
         return self._trajectory
 
+    @trajectory.setter
+    def trajectory(self, trajectory: Trajectory):
+        self._trajectory = trajectory
+
     @property
     def replay_config(self) -> BaseModel | None:
         return self._replay_config
@@ -759,6 +769,22 @@ class DefaultAgent(AbstractAgent):
         attempt_data["replay_config"] = self.replay_config.model_dump_json() if self.replay_config is not None else None
         attempt_data["environment"] = self._env.name
         return attempt_data
+
+    def get_state(self) -> dict[str, Any]:
+        """Get the entire trajectory data"""
+        state = {"agent_state": {}, "system_state": {}}
+
+        state["agent_state"] = self.get_trajectory_data()
+        state["agent_state"]["history"] = self.history
+        state["agent_state"]["agent"] = self.name
+
+        state["system_state"]["container_name"] = self._env.deployment._container_name
+        return state
+
+    def set_agent_state(self, state):
+        self.history = state["history"]
+        self.name = state["agent"]
+        self.trajectory = state["trajectory"]
 
     def save_trajectory(
         self,
@@ -1222,6 +1248,10 @@ class DefaultAgent(AbstractAgent):
         1. Update message history with performed action and observation
         2. Update trajectory with the final executed result
         3. Update the info dictionary
+        4. Inform the local orchestrator to take a snapshot
+
+        Args:
+            local_orchestrator : Object of the Local Orchestrator
 
         Returns:
             step_output: step output (same as the output of `self.forward_with_handling`)
@@ -1243,7 +1273,23 @@ class DefaultAgent(AbstractAgent):
         self.add_step_to_trajectory(step_output)
 
         self._chook.on_step_done(step=step_output, info=self.info)
-        return step_output
+        return step_output, n_step
+
+    def notify_orchestrator(self) -> str:
+        """Notify the Global Orchestrator that the task is about to start.
+
+        Global Orhcestrator starts and returns an object of the LocalOrchestrator 
+        that the agent will communicate periodically to take a snapshot.
+
+        Returns:
+            local_orchestrator : Object of the LocalOrchestrator
+        """
+        response = requests.post("http://127.0.0.1:8000/start_task", json={"agent_id": self.name})
+        if response.status_code == 200:
+            data = response.json()
+            return data["local_orchestrator_url"]
+        else:
+            raise RuntimeError(f"Failed to start task: {response.text}")
 
     def run(
         self,
@@ -1264,9 +1310,37 @@ class DefaultAgent(AbstractAgent):
         # Run action/observation loop
         self._chook.on_run_start()
         step_output = StepOutput()
+        local_orchestrator_url = self.notify_orchestrator()
         while not step_output.done:
-            step_output = self.step()
+            step_output, n_step = self.step()
             self.save_trajectory()
+
+            if local_orchestrator_url:
+                # Check whether to initiate snapshot
+                payload = {"step": n_step, "step_output": step_output.model_dump()}
+                response = requests.post(f"{local_orchestrator_url}/initiate_snapshot", json=payload)
+                initiate_snapshot = response.json()["initiate"]
+                self.logger.info(response.json()["message"])
+
+                if initiate_snapshot:
+                    # Initiate sapshot procedure
+                    payload = {"state": self.get_state(), "step": n_step}
+                    notify_response = requests.post(f"{local_orchestrator_url}/notify_snapshot", json=payload)
+                    if notify_response.status_code == 200:
+                        self.logger.info("Snapshot initiated")
+                    else:
+                        raise RuntimeError(f"Failed to initiate snapshot: {notify_response.text}")
+                else:
+                    # Step output verification failed. Need to Rollback
+                    response = requests.post(f"{local_orchestrator_url}/choose_rollback_snapshot")
+                    self.logger.info(response.json()["message"])
+                    agent_state = response.json()["agent_state"]
+
+                    system_state = response.json()["system_state"]
+                    self._env.restart_deployment_with_image(new_image=system_state["snapshot_image"]["image_id"], 
+                                                           reuse_existing_repo=True)
+                    self.set_agent_state(agent_state)
+
         self._chook.on_run_done(trajectory=self.trajectory, info=self.info)
 
         self.logger.info("Trajectory saved to %s", self.traj_path)
