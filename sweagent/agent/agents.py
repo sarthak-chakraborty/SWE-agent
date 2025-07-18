@@ -1354,6 +1354,7 @@ class DefaultAgent(AbstractAgent):
                     system_state = response.json()["system_state"]
                     self._env.restart_deployment_with_image(new_image=system_state["snapshot_image"]["image_id"], 
                                                            reuse_existing_repo=True)
+                    self.tools.install(self._env)
                     self.set_agent_state(agent_state)
 
         self._chook.on_run_done(trajectory=self.trajectory, info=self.info)

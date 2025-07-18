@@ -208,7 +208,7 @@ class SWEEnv:
         
         self.repo = current_repo
         self._init_deployment()
-        
+    
         if reuse_existing_repo:
             self.logger.info("Skipping all repo copy/reset (repo is already present in the container).")
             self._chook.on_environment_startup()
